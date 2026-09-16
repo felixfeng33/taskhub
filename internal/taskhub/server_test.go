@@ -3,11 +3,13 @@ package taskhub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -98,7 +100,7 @@ func TestTaskLifecycleAcrossClientsAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	task, err = s.Get(context.Background(), 1)
+	task, err = s.Get(context.Background(), 1, false)
 	if err != nil || task.Body != body || task.Status != "done" {
 		t.Fatalf("restart lost data: %+v %v", task, err)
 	}
@@ -106,7 +108,7 @@ func TestTaskLifecycleAcrossClientsAndRestart(t *testing.T) {
 
 func TestConcurrentClaims(t *testing.T) {
 	s, ts := fixture(t)
-	_, err := s.Add(context.Background(), "one job", "", "pending")
+	_, err := s.Add(context.Background(), "one job", "", "pending", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +178,7 @@ func TestAuthValidationAndMissingTasks(t *testing.T) {
 func TestFilteringPaginationAndPartialUpdate(t *testing.T) {
 	s, ts := fixture(t)
 	for i := 0; i < 3; i++ {
-		if _, err := s.Add(context.Background(), "title", "keep this body", "pending"); err != nil {
+		if _, err := s.Add(context.Background(), "title", "keep this body", "pending", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -206,5 +208,138 @@ func TestFilteringPaginationAndPartialUpdate(t *testing.T) {
 	json.Unmarshal(raw, &task)
 	if code != 200 || task.Body != "" {
 		t.Fatalf("clear body: %d %s", code, raw)
+	}
+}
+
+func TestUpgradeFromV010PreservesTasks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', status TEXT NOT NULL);
+INSERT INTO tasks(id,title,body,status) VALUES(7,'Existing task','原来的正文','in_progress');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	task, err := s.Get(ctx, 7, false)
+	if err != nil || task != (Task{ID: 7, Title: "Existing task", Body: "原来的正文", Status: "in_progress"}) {
+		t.Fatalf("migration changed task: %+v %v", task, err)
+	}
+	project := "ellie"
+	if _, err := s.Update(ctx, 7, Update{Project: &project}); err != nil {
+		t.Fatal(err)
+	}
+	archive := true
+	if _, err := s.Update(ctx, 7, Update{Archived: &archive}); err != nil {
+		t.Fatal(err)
+	}
+	// A v0.1.0-style writer omits the added column; its new tasks stay valid.
+	if _, err := s.db.Exec(`INSERT INTO tasks(title,body,status) VALUES('Legacy writer','','pending')`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Get(ctx, 7, false); err != ErrNotFound {
+		t.Fatalf("reopening revealed archived task: %v", err)
+	}
+	task, err = s.Get(ctx, 7, true)
+	if err != nil || !task.Archived || task.Project != "ellie" || task.Body != "原来的正文" || task.Status != "in_progress" {
+		t.Fatalf("reopen changed task: %+v %v", task, err)
+	}
+	legacy, err := s.Get(ctx, 8, false)
+	if err != nil || legacy.Project != "" {
+		t.Fatalf("old writer compatibility: %+v %v", legacy, err)
+	}
+}
+
+func TestProjectsAcrossCreateUpdateAndList(t *testing.T) {
+	_, ts := fixture(t)
+	for _, body := range []string{
+		`{"title":"A","body":"preserve A","project":" ellie "}`,
+		`{"title":"B","body":"preserve B","project":"plate"}`,
+		`{"title":"C"}`,
+		`{"title":"D","project":"ellie","status":"review"}`,
+	} {
+		code, raw := api(t, ts.URL, "POST", "/tasks", testToken, body)
+		if code != 201 {
+			t.Fatalf("create: %d %s", code, raw)
+		}
+	}
+	for _, tc := range []struct {
+		query string
+		ids   []int64
+	}{
+		{"", []int64{1, 2, 3, 4}},
+		{"?project=ellie", []int64{1, 4}},
+		{"?project=ellie&status=pending", []int64{1}},
+		{"?project=ellie&after=1&limit=1", []int64{4}},
+		{"?project=", []int64{3}},
+		{"?project=Ellie", nil},
+		{"?project=unknown", nil},
+	} {
+		code, raw := api(t, ts.URL, "GET", "/tasks"+tc.query, testToken, "")
+		var tasks []Summary
+		if err := json.Unmarshal(raw, &tasks); err != nil || code != 200 {
+			t.Fatalf("list: %d %s %v", code, raw, err)
+		}
+		if len(tasks) != len(tc.ids) {
+			t.Fatalf("%s: %s", tc.query, raw)
+		}
+		for i, task := range tasks {
+			if task.ID != tc.ids[i] {
+				t.Fatalf("%s: %s", tc.query, raw)
+			}
+		}
+	}
+	code, raw := api(t, ts.URL, "PATCH", "/tasks/2", testToken, `{"project":" 中文项目 "}`)
+	var task Task
+	json.Unmarshal(raw, &task)
+	if code != 200 || task.Project != "中文项目" || task.Body != "preserve B" || task.Status != "pending" {
+		t.Fatalf("project-only update: %d %s", code, raw)
+	}
+	code, raw = api(t, ts.URL, "GET", "/tasks?project="+url.QueryEscape("中文项目"), testToken, "")
+	var summaries []Summary
+	json.Unmarshal(raw, &summaries)
+	if code != 200 || len(summaries) != 1 || summaries[0].ID != 2 {
+		t.Fatalf("Unicode filter: %d %s", code, raw)
+	}
+	code, raw = api(t, ts.URL, "PATCH", "/tasks/2", testToken, `{"status":"review"}`)
+	json.Unmarshal(raw, &task)
+	if code != 200 || task.Project != "中文项目" {
+		t.Fatalf("legacy update erased project: %d %s", code, raw)
+	}
+	code, raw = api(t, ts.URL, "PATCH", "/tasks/2", testToken, `{"project":""}`)
+	json.Unmarshal(raw, &task)
+	if code != 200 || task.Project != "" || task.Body != "preserve B" {
+		t.Fatalf("clear project: %d %s", code, raw)
+	}
+	for _, project := range []string{strings.Repeat("界", 81), "a\nb", "a\tb", "a\x1bb"} {
+		payload, _ := json.Marshal(map[string]string{"title": "bad", "project": project})
+		code, _ := api(t, ts.URL, "POST", "/tasks", testToken, string(payload))
+		if code != 400 {
+			t.Errorf("create accepted invalid project %q: %d", project, code)
+		}
+		code, _ = api(t, ts.URL, "PATCH", "/tasks/1", testToken, string(payload))
+		if code != 400 {
+			t.Errorf("update accepted invalid project %q: %d", project, code)
+		}
+		code, _ = api(t, ts.URL, "GET", "/tasks?project="+url.QueryEscape(project), testToken, "")
+		if code != 400 {
+			t.Errorf("filter accepted invalid project %q: %d", project, code)
+		}
+	}
+	if err := ValidateProject(strings.Repeat("界", 80)); err != nil {
+		t.Fatalf("80 Unicode characters rejected: %v", err)
 	}
 }

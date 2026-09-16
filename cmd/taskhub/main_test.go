@@ -36,13 +36,13 @@ func TestCLISharedServer(t *testing.T) {
 		return out.String(), err
 	}
 	body := "# Requirement\n\n你好，remote Mac.\n"
-	out, err := call(body, "add", "--title", "Shared task", "--body-file", "-", "--json")
+	out, err := call(body, "add", "--title", "Shared task", "--body-file", "-", "--project", " ellie ", "--json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var task taskhub.Task
 	json.Unmarshal([]byte(out), &task)
-	if task.ID != 1 || task.Body != body {
+	if task.ID != 1 || task.Body != body || task.Project != "ellie" {
 		t.Fatalf("create output: %s", out)
 	}
 	out, err = call("", "show", "1", "--body-only")
@@ -57,9 +57,26 @@ func TestCLISharedServer(t *testing.T) {
 	if e, ok := err.(*apiError); !ok || e.Status != 409 {
 		t.Fatalf("claim conflict: %v", err)
 	}
-	out, err = call("", "list", "--status", "in_progress", "--json")
+	out, err = call("", "list", "--status", "in_progress", "--project", "ellie", "--json")
 	if err != nil || !strings.Contains(out, `"id": 1`) {
 		t.Fatalf("list: %s %v", out, err)
+	}
+	out, err = call("", "list", "--project", "plate", "--json")
+	if err != nil || strings.TrimSpace(out) != "[]" {
+		t.Fatalf("filtered list: %s %v", out, err)
+	}
+	out, err = call("", "update", "1", "--project", "plate", "--json")
+	json.Unmarshal([]byte(out), &task)
+	if err != nil || task.Project != "plate" || task.Body != body {
+		t.Fatalf("project-only update: %s %v", out, err)
+	}
+	_, err = call("", "update", "1", "--project", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = call("", "list", "--project", "", "--json")
+	if err != nil || !strings.Contains(out, `"id": 1`) {
+		t.Fatalf("unassigned filter: %s %v", out, err)
 	}
 	_, err = call("", "update", "1", "--body", "")
 	if err != nil {
@@ -72,6 +89,49 @@ func TestCLISharedServer(t *testing.T) {
 	_, err = call("", "update", "1")
 	if err == nil {
 		t.Fatal("empty update accepted")
+	}
+	out, err = call("", "archive", "1", "--json")
+	if err != nil || !strings.Contains(out, `"archived": true`) {
+		t.Fatalf("archive: %s %v", out, err)
+	}
+	out, err = call("", "show", "1", "--json")
+	if e, ok := err.(*apiError); !ok || e.Status != 404 || out != "" {
+		t.Fatalf("show exposed archive: %s %v", out, err)
+	}
+	out, err = call("", "list", "--json")
+	if err != nil || strings.TrimSpace(out) != "[]" {
+		t.Fatalf("list exposed archive: %s %v", out, err)
+	}
+	out, err = call("", "list", "--archived", "--json")
+	if err != nil || !strings.Contains(out, `"archived": true`) {
+		t.Fatalf("archived list: %s %v", out, err)
+	}
+	out, err = call("", "show", "1", "--archived", "--json")
+	if err != nil || !strings.Contains(out, `"archived": true`) {
+		t.Fatalf("explicit archived show: %s %v", out, err)
+	}
+	_, err = call("", "unarchive", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = call("", "show", "1", "--json")
+	if err != nil || !strings.Contains(out, `"archived": false`) || !strings.Contains(out, `"status": "in_progress"`) {
+		t.Fatalf("restore: %s %v", out, err)
+	}
+}
+
+func TestProjectFilterRejectsUnfilteredLegacyResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[{"id":1,"title":"legacy","status":"pending"}]`))
+	}))
+	defer server.Close()
+	t.Setenv("TASKHUB_URL", server.URL)
+	t.Setenv("TASKHUB_TOKEN", "test-token-1234567890")
+	var out bytes.Buffer
+	err := run(context.Background(), []string{"list", "--project", "ellie", "--json", "--config", filepath.Join(t.TempDir(), "config.json")}, strings.NewReader(""), &out, &out)
+	if err == nil || !strings.Contains(err.Error(), "upgrade the server") || out.Len() != 0 {
+		t.Fatalf("legacy filter silently accepted: %v %s", err, out.String())
 	}
 }
 

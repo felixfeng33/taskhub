@@ -30,17 +30,21 @@ const help = `taskhub - shared tasks for people and coding agents
 Usage:
   taskhub serve [--listen 127.0.0.1:8080] [--db PATH] [--token-file PATH]
   taskhub config --url URL --token-stdin
-  taskhub add --title TITLE [--body TEXT | --body-file PATH] [--status STATUS]
-  taskhub list [--status STATUS] [--limit 100] [--after ID]
-  taskhub show ID [--body-only]
+  taskhub add --title TITLE [--body TEXT | --body-file PATH] [--status STATUS] [--project NAME]
+  taskhub list [--status STATUS] [--project NAME] [--archived] [--limit 100] [--after ID]
+  taskhub show ID [--body-only] [--archived]
   taskhub update ID [--title TITLE] [--body TEXT | --body-file PATH] [--status STATUS]
-                   [--if-status STATUS]
+                   [--project NAME] [--if-status STATUS]
   taskhub version
+  taskhub archive ID
+  taskhub unarchive ID
 
 Client commands accept --url URL, --config PATH, and --json.
 Configuration: flags > TASKHUB_URL / TASKHUB_TOKEN > local config.
 Use --body-file - to read Markdown from stdin.
 Statuses: pending, in_progress, review, done.
+Projects: optional, case-sensitive names; use --project '' for tasks without a project.
+Archived tasks are hidden from list and show unless --archived is specified.
 Run a command with --help for its options.
 `
 
@@ -83,7 +87,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if command == "serve" {
 		return serve(ctx, rest, stderr)
 	}
-	if command != "config" && command != "add" && command != "list" && command != "show" && command != "update" {
+	if command != "config" && command != "add" && command != "list" && command != "show" && command != "update" && command != "archive" && command != "unarchive" {
 		return fmt.Errorf("unknown command %q; use taskhub --help", command)
 	}
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -95,12 +99,13 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	configPath := f.String("config", path, "client config file")
 	serverURL := f.String("url", "", "server URL")
 	jsonOutput := f.Bool("json", false, "print machine-readable JSON")
-	var title, body, bodyFile, status, ifStatus string
-	var bodyOnly, tokenStdin bool
+	var title, body, bodyFile, status, ifStatus, project string
+	var bodyOnly, tokenStdin, archived bool
 	var limit int
 	var after int64
 	var id string
-	if command == "show" || command == "update" {
+	needsID := command == "show" || command == "update" || command == "archive" || command == "unarchive"
+	if needsID {
 		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 			id, rest = rest[0], rest[1:]
 		}
@@ -109,6 +114,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "config":
 		f.BoolVar(&tokenStdin, "token-stdin", false, "read and save token from stdin")
 	case "add", "update":
+		f.StringVar(&project, "project", "", "project name; empty clears it")
 		f.StringVar(&title, "title", "", "task title")
 		f.StringVar(&body, "body", "", "Markdown body")
 		f.StringVar(&bodyFile, "body-file", "", "Markdown file, or - for stdin")
@@ -117,10 +123,13 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			f.StringVar(&ifStatus, "if-status", "", "update only if current status matches")
 		}
 	case "list":
+		f.BoolVar(&archived, "archived", false, "list archived tasks instead of active tasks")
+		f.StringVar(&project, "project", "", "filter by project; empty selects tasks without a project")
 		f.StringVar(&status, "status", "", "filter by status")
 		f.IntVar(&limit, "limit", 100, "maximum results, 1 to 1000")
 		f.Int64Var(&after, "after", 0, "return tasks after this ID")
 	case "show":
+		f.BoolVar(&archived, "archived", false, "allow reading an archived task")
 		f.BoolVar(&bodyOnly, "body-only", false, "print exact Markdown body")
 	}
 	if err := f.Parse(rest); err != nil {
@@ -130,10 +139,16 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return err
 	}
 	if f.NArg() != 0 {
-		return errors.New("unexpected arguments; put the task ID immediately after show or update")
+		return errors.New("unexpected arguments; put the task ID immediately after show, update, archive, or unarchive")
 	}
 	seen := map[string]bool{}
 	f.Visit(func(f *flag.Flag) { seen[f.Name] = true })
+	project = strings.TrimSpace(project)
+	if seen["project"] {
+		if err := taskhub.ValidateProject(project); err != nil {
+			return err
+		}
+	}
 	c, err := loadConfig(*configPath)
 	if err != nil {
 		return err
@@ -186,7 +201,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if c.Token == "" {
 		return errors.New("set TASKHUB_TOKEN or run taskhub config --url URL --token-stdin")
 	}
-	if command == "show" || command == "update" {
+	if needsID {
 		n, err := strconv.ParseInt(id, 10, 64)
 		if err != nil || n < 1 {
 			return errors.New("provide a positive task ID immediately after the command")
@@ -234,22 +249,43 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		if status != "" {
 			query.Set("status", status)
 		}
+		if seen["project"] {
+			query.Set("project", project)
+		}
 		var tasks []taskhub.Summary
+		if archived {
+			query.Set("archived", "true")
+		}
 		if err := request(ctx, client, c, "GET", base+"/tasks?"+query.Encode(), nil, &tasks); err != nil {
 			return err
+		}
+		if seen["project"] {
+			for _, task := range tasks {
+				if task.Project != project {
+					return errors.New("server did not apply the project filter; upgrade the server to v0.2.0 or newer")
+				}
+			}
+		}
+		for _, task := range tasks {
+			if task.Archived != archived {
+				return errors.New("server did not apply the archived filter; upgrade the server to v0.2.0 or newer")
+			}
 		}
 		if *jsonOutput {
 			return printJSON(stdout, tasks)
 		}
 		w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tSTATUS\tTITLE")
+		fmt.Fprintln(w, "ID\tSTATUS\tPROJECT\tTITLE")
 		for _, t := range tasks {
-			fmt.Fprintf(w, "%d\t%s\t%s\n", t.ID, t.Status, safeText(t.Title))
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", t.ID, t.Status, displayProject(t.Project), safeText(t.Title))
 		}
 		return w.Flush()
 	}
 	var t taskhub.Task
 	method, endpoint := "GET", base+"/tasks/"+id
+	if command == "show" && archived {
+		endpoint += "?archived=true"
+	}
 	var payload any
 	if command == "add" {
 		if status == "" {
@@ -259,7 +295,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return err
 		}
 		method, endpoint = "POST", base+"/tasks"
-		payload = map[string]string{"title": title, "body": body, "status": status}
+		input := map[string]string{"title": title, "body": body, "status": status}
+		if seen["project"] {
+			input["project"] = project
+		}
+		payload = input
 	} else if command == "update" {
 		u := taskhub.Update{}
 		if seen["title"] {
@@ -274,13 +314,22 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		if seen["if-status"] {
 			u.IfStatus = &ifStatus
 		}
-		if u.Title == nil && u.Body == nil && u.Status == nil {
-			return errors.New("provide --title, --body, --body-file, or --status")
+		if seen["project"] {
+			u.Project = &project
+		}
+		if u.Title == nil && u.Body == nil && u.Status == nil && u.Project == nil {
+			return errors.New("provide --title, --body, --body-file, --status, or --project")
 		}
 		method, payload = "PATCH", u
+	} else if command == "archive" || command == "unarchive" {
+		value := command == "archive"
+		method, payload = "PATCH", taskhub.Update{Archived: &value}
 	}
 	if err := request(ctx, client, c, method, endpoint, payload, &t); err != nil {
 		return err
+	}
+	if command == "show" && t.Archived && !archived {
+		return errors.New("task not found")
 	}
 	if bodyOnly && *jsonOutput {
 		return errors.New("use either --body-only or --json")
@@ -293,10 +342,21 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return printJSON(stdout, t)
 	}
 	fmt.Fprintf(stdout, "#%d [%s] %s\n", t.ID, t.Status, safeText(t.Title))
+	fmt.Fprintf(stdout, "Project: %s\n", displayProject(t.Project))
+	if t.Archived {
+		fmt.Fprintln(stdout, "Archived: yes")
+	}
 	if command == "show" && t.Body != "" {
 		fmt.Fprintf(stdout, "\n%s\n", safeText(t.Body))
 	}
 	return nil
+}
+
+func displayProject(project string) string {
+	if project == "" {
+		return "(none)"
+	}
+	return safeText(project)
 }
 
 func safeText(s string) string {

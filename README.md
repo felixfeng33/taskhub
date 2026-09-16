@@ -1,6 +1,6 @@
 # taskhub
 
-A shared task list for your laptop, remote Mac, and server. One binary runs the HTTP server or acts as its CLI client. Tasks contain a title, a Markdown body, a status, and an automatically assigned ID.
+A shared task list for your laptop, remote Mac, and server. One binary runs the HTTP server or acts as its CLI client. Tasks contain a title, a Markdown body, a status, an optional project name, and an automatically assigned ID.
 
 [中文说明](README.zh-CN.md) · [Releases](https://github.com/felixfeng33/taskhub/releases)
 
@@ -12,7 +12,7 @@ Or download and inspect the installer, then run it:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/felixfeng33/taskhub/main/scripts/install.sh -o install-taskhub.sh
-sh install-taskhub.sh v0.1.0
+sh install-taskhub.sh v0.2.0
 export PATH="$HOME/.local/bin:$PATH"
 taskhub version
 ```
@@ -55,19 +55,20 @@ Overrides: `--url` takes precedence over `TASKHUB_URL`, which takes precedence o
 ## Commands
 
 ```sh
-taskhub add --title "Implement sign-in" --body-file spec.md
+taskhub add --title "Implement sign-in" --project ellie --body-file spec.md
 taskhub list
-taskhub list --status pending --json
+taskhub list --project ellie --status pending --json
 taskhub show 1
 taskhub show 1 --body-only > spec.md
 taskhub update 1 --title "Implement email sign-in"
+taskhub update 1 --project ellie
 taskhub update 1 --body-file revised-spec.md
 taskhub update 1 --status in_progress --if-status pending
 taskhub update 1 --status review
 taskhub update 1 --status done
 ```
 
-`add`, `list`, `show`, and `update` accept `--json`. Place the ID immediately after `show` or `update`, then pass flags. Use `--body-file -` to read stdin. An explicit `--body ''` clears the body; omitted fields remain unchanged. `show --body-only` emits the original body without changing its trailing newline. Human-readable output strips terminal control characters; JSON and `--body-only` preserve the stored content.
+`add`, `list`, `show`, `update`, `archive`, and `unarchive` accept `--json`. Place the ID immediately after `show`, `update`, `archive`, or `unarchive`, then pass flags. Use `--body-file -` to read stdin. An explicit `--body ''` clears the body; omitted fields remain unchanged. `show --body-only` emits the original body without changing its trailing newline. Human-readable output strips terminal control characters; JSON and `--body-only` preserve the stored content.
 
 Statuses are `pending`, `in_progress`, `review`, and `done`. New tasks default to `pending`. Status transitions are flexible, so rejected work can return to `pending`.
 
@@ -81,6 +82,40 @@ The check and update happen atomically. Only one client succeeds; the other rece
 
 Taskhub does not start agents, run Git commands, or infer completion. Your agent reads the body and explicitly updates the status. Put implementation instructions, acceptance criteria, feedback, and commit IDs in the body. Body updates replace the whole body; concurrent unconditional writes use the last accepted write. Keep one editor per task when editing requirements.
 
+## Projects
+
+A task belongs to zero or one project. Project names are plain, case-sensitive strings; use a name directly without registering it first. Leading and trailing whitespace is trimmed. Names can contain up to 80 Unicode characters and cannot contain control characters.
+
+```sh
+taskhub add --title "Fix editor selection" --project plate --body-file spec.md
+taskhub list --project plate --status pending
+taskhub update 1 --project ellie
+taskhub update 1 --project ''     # remove the project
+taskhub list --project ''         # only tasks without a project
+taskhub list                     # all projects
+```
+
+JSON uses `"project":""` for tasks without a project. Omitting `project` in an update keeps its current value. Projects filter tasks; they do not automatically select a Git checkout or start an agent.
+
+## Archive and restore
+
+```sh
+taskhub archive 1
+taskhub list                          # archived tasks are hidden
+taskhub show 1                        # archived tasks return "task not found"
+taskhub list --archived --project ellie
+taskhub show 1 --archived              # explicitly inspect an archived task
+taskhub unarchive 1
+```
+
+Archiving preserves the title, body, project, and workflow status. `archived` is a separate boolean, not a workflow status. Default `list` and `show` hide archived tasks on the server, including for older clients. `list --archived` returns only archived tasks; `show --archived` allows reading a task even if it is archived. Restore a task before editing its fields. Repeated archive or unarchive calls are safe.
+
+### Upgrading from v0.1.0
+
+Upgrade the server first, then the clients. On startup, the server adds the `project` and `archived` columns in a transaction if they are missing. Existing task IDs, titles, bodies, and statuses are preserved, and existing tasks have an empty project and are not archived. Repeated startup is safe. Back up the database before updating an existing deployment.
+
+The v0.1.0 client continues to read and update tasks through the new server; its updates preserve projects. The project and archive commands require a v0.2.0 or newer client and server.
+
 ## HTTP API
 
 Send `Authorization: Bearer <token>` on every task request and `Content-Type: application/json` on writes.
@@ -88,15 +123,15 @@ Send `Authorization: Bearer <token>` on every task request and `Content-Type: ap
 | Method | Path | Result |
 | --- | --- | --- |
 | POST | `/tasks` | Create a task, HTTP 201 |
-| GET | `/tasks` | List summaries containing `id`, `title`, `status` |
-| GET | `/tasks/{id}` | Read a complete task |
-| PATCH | `/tasks/{id}` | Update selected fields |
+| GET | `/tasks` | List summaries containing `id`, `title`, `status`, `project`, `archived` |
+| GET | `/tasks/{id}` | Read an active task; add `?archived=true` to allow archived tasks |
+| PATCH | `/tasks/{id}` | Update selected fields, or archive/restore |
 | GET | `/healthz` | Public health check |
 
 Create body:
 
 ```json
-{"title":"Implement sign-in","body":"# Requirements\n...","status":"pending"}
+{"title":"Implement sign-in","body":"# Requirements\n...","status":"pending","project":"ellie"}
 ```
 
 Update body:
@@ -105,13 +140,25 @@ Update body:
 {"status":"in_progress","if_status":"pending"}
 ```
 
+Archive and restore use separate PATCH requests:
+
+```json
+{"archived":true}
+```
+
+```json
+{"archived":false}
+```
+
+Do not combine `archived` with edits to the title, body, project, or status. An optional `if_status` precondition is accepted. Editing archived tasks returns 404 until they are restored.
+
 Task response:
 
 ```json
-{"id":1,"title":"Implement sign-in","body":"# Requirements\n...","status":"pending"}
+{"id":1,"title":"Implement sign-in","body":"# Requirements\n...","status":"pending","project":"ellie","archived":false}
 ```
 
-List query parameters: `status`, `limit` (default 100, maximum 1000), and `after` (exclusive ID). Results use ascending ID order. To continue listing, use the last returned ID as `after` until an empty array is returned. Titles are single-line strings of 1–200 Unicode characters; bodies can contain up to 1 MiB of UTF-8 text.
+List query parameters: `archived` (`false` by default, `true` for archived tasks only), `status`, `project` (exact match; an explicit empty value selects unassigned tasks), `limit` (default 100, maximum 1000), and `after` (exclusive ID). Results use ascending ID order. To continue listing, use the last returned ID as `after` until an empty array is returned. Titles are single-line strings of 1–200 Unicode characters; bodies can contain up to 1 MiB of UTF-8 text.
 
 API errors contain `{"error":"message"}` for validation, authentication, missing tasks, and conflicts. Unknown routes and unsupported methods use Go's standard HTTP responses. There is one shared workspace and one token, with no per-user permissions or document history.
 
@@ -126,7 +173,7 @@ sudo systemctl enable --now taskhub
 
 The service stores data in `/var/lib/taskhub`. The [Caddy example](deploy/Caddyfile.example) shows an HTTPS reverse proxy; replace its hostname with your domain.
 
-Back up with SQLite's online backup API or stop the service before copying the database. Do not copy only the `.db` file from a running WAL database. Upgrading the binary leaves task data in place. This release initializes its schema on first start and does not require a migration command.
+Back up with SQLite's online backup API or stop the service before copying the database. Do not copy only the `.db` file from a running WAL database. Upgrading the binary leaves task data in place. Schema initialization and the project and archive migrations run automatically on startup; there is no separate migration command.
 
 ## Development and releases
 
@@ -134,7 +181,7 @@ Back up with SQLite's online backup API or stop the service before copying the d
 go test -race ./...
 go vet ./...
 go build -o bin/taskhub ./cmd/taskhub
-sh scripts/build-release.sh v0.1.0
+sh scripts/build-release.sh v0.2.0
 ```
 
 CI tests macOS and Linux. Pushing a `v*` tag runs tests, builds four platform archives, and publishes a GitHub Release with checksums. Release binaries bundle dependency license notices.

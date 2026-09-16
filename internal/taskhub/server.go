@@ -18,6 +18,19 @@ func Handler(store *Store, token, version string) (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /tasks", func(w http.ResponseWriter, r *http.Request) {
+		archived, ok := archivedQuery(w, r)
+		if !ok {
+			return
+		}
+		var project *string
+		if r.URL.Query().Has("project") {
+			value := strings.TrimSpace(r.URL.Query().Get("project"))
+			if err := ValidateProject(value); err != nil {
+				fail(w, 400, err.Error())
+				return
+			}
+			project = &value
+		}
 		status := r.URL.Query().Get("status")
 		if status != "" && !ValidStatus(status) {
 			fail(w, 400, "invalid status")
@@ -39,7 +52,7 @@ func Handler(store *Store, token, version string) (http.Handler, error) {
 			fail(w, 400, "after must be a nonnegative task ID")
 			return
 		}
-		tasks, err := store.List(r.Context(), status, after, limit)
+		tasks, err := store.List(r.Context(), status, project, archived, after, limit)
 		if err != nil {
 			storeError(w, err)
 			return
@@ -48,9 +61,10 @@ func Handler(store *Store, token, version string) (http.Handler, error) {
 	})
 	mux.HandleFunc("POST /tasks", func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
-			Title  string `json:"title"`
-			Body   string `json:"body"`
-			Status string `json:"status"`
+			Title   string `json:"title"`
+			Body    string `json:"body"`
+			Status  string `json:"status"`
+			Project string `json:"project"`
 		}
 		if !decode(w, r, &input) {
 			return
@@ -62,7 +76,11 @@ func Handler(store *Store, token, version string) (http.Handler, error) {
 			fail(w, 400, err.Error())
 			return
 		}
-		t, err := store.Add(r.Context(), input.Title, input.Body, input.Status)
+		if err := ValidateProject(strings.TrimSpace(input.Project)); err != nil {
+			fail(w, 400, err.Error())
+			return
+		}
+		t, err := store.Add(r.Context(), input.Title, input.Body, input.Status, input.Project)
 		if err != nil {
 			storeError(w, err)
 			return
@@ -71,11 +89,15 @@ func Handler(store *Store, token, version string) (http.Handler, error) {
 		writeJSON(w, 201, t)
 	})
 	mux.HandleFunc("GET /tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		archived, ok := archivedQuery(w, r)
+		if !ok {
+			return
+		}
 		id, ok := taskID(w, r)
 		if !ok {
 			return
 		}
-		t, err := store.Get(r.Context(), id)
+		t, err := store.Get(r.Context(), id, archived)
 		if err != nil {
 			storeError(w, err)
 			return
@@ -118,6 +140,18 @@ func Handler(store *Store, token, version string) (http.Handler, error) {
 		}
 		mux.ServeHTTP(w, r)
 	}), nil
+}
+
+func archivedQuery(w http.ResponseWriter, r *http.Request) (bool, bool) {
+	value := r.URL.Query().Get("archived")
+	if value == "" || value == "false" {
+		return false, true
+	}
+	if value == "true" {
+		return true, true
+	}
+	fail(w, 400, "archived must be true or false")
+	return false, false
 }
 
 func taskID(w http.ResponseWriter, r *http.Request) (int64, bool) {
