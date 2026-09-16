@@ -1,0 +1,10 @@
+/bin/
+/dist/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+.env
+.env.*
+config.local.json
+.DS_Store
