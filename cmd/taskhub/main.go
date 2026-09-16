@@ -25,29 +25,6 @@ import (
 
 var version = "dev"
 
-const help = `taskhub - shared tasks for people and coding agents
-
-Usage:
-  taskhub serve [--listen 127.0.0.1:8080] [--db PATH] [--token-file PATH]
-  taskhub config --url URL --token-stdin
-  taskhub add --title TITLE [--body TEXT | --body-file PATH] [--status STATUS] [--project NAME]
-  taskhub list [--status STATUS] [--project NAME] [--archived] [--limit 100] [--after ID]
-  taskhub show ID [--body-only] [--archived]
-  taskhub update ID [--title TITLE] [--body TEXT | --body-file PATH] [--status STATUS]
-                   [--project NAME] [--if-status STATUS]
-  taskhub version
-  taskhub archive ID
-  taskhub unarchive ID
-
-Client commands accept --url URL, --config PATH, and --json.
-Configuration: flags > TASKHUB_URL / TASKHUB_TOKEN > local config.
-Use --body-file - to read Markdown from stdin.
-Statuses: pending, in_progress, review, done.
-Projects: optional, case-sensitive names; use --project '' for tasks without a project.
-Archived tasks are hidden from list and show unless --archived is specified.
-Run a command with --help for its options.
-`
-
 type config struct {
 	URL   string `json:"url"`
 	Token string `json:"token"`
@@ -75,15 +52,31 @@ func defaultConfig() (string, error) {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || (args[0] == "help" && len(args) == 1) {
 		_, err := fmt.Fprint(stdout, help)
 		return err
 	}
+	if args[0] == "help" {
+		if len(args) != 2 || args[1] == "help" {
+			return errors.New("usage: taskhub help COMMAND")
+		}
+		return run(ctx, []string{args[1], "--help"}, stdin, stdout, stderr)
+	}
 	if args[0] == "version" || args[0] == "--version" {
+		if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
+			fmt.Fprintln(stdout, "Usage: taskhub version\nPrint the installed CLI version without connecting to the server.")
+			return nil
+		}
+		if len(args) != 1 {
+			return errors.New("version takes no arguments")
+		}
 		fmt.Fprintln(stdout, version)
 		return nil
 	}
 	command, rest := args[0], args[1:]
+	if command == "skill" {
+		return runSkill(rest, stdout, stderr)
+	}
 	if command == "serve" {
 		return serve(ctx, rest, stderr)
 	}
@@ -92,6 +85,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
 	f.SetOutput(stderr)
+	setUsage(f, commandHelp[command])
 	path, err := defaultConfig()
 	if err != nil {
 		return err
@@ -465,6 +459,7 @@ func request(ctx context.Context, client *http.Client, c config, method, endpoin
 func serve(ctx context.Context, args []string, stderr io.Writer) error {
 	f := flag.NewFlagSet("serve", flag.ContinueOnError)
 	f.SetOutput(stderr)
+	setUsage(f, commandHelp["serve"])
 	listen := f.String("listen", "127.0.0.1:8080", "HTTP listening address")
 	path, err := defaultConfig()
 	if err != nil {

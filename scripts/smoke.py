@@ -15,6 +15,12 @@ environment = {k: v for k, v in os.environ.items() if k not in ("TASKHUB_URL", "
 
 with tempfile.TemporaryDirectory(prefix="taskhub-smoke-") as directory:
     root = Path(directory)
+    skill_dir = root / "codex" / "skills" / "taskhub"
+    subprocess.run([binary, "skill", "install", "--dir", str(skill_dir)], check=True, capture_output=True, text=True, env=environment)
+    manual = subprocess.check_output([binary, "skill"], text=True, env=environment)
+    assert (skill_dir / "SKILL.md").read_text() == manual
+    assert (skill_dir / "agents" / "openai.yaml").is_file()
+    subprocess.run([binary, "help", "update"], check=True, capture_output=True, text=True, env=environment)
     token = secrets.token_hex(32)
     database = root / "tasks.db"
     with sqlite3.connect(database) as db:
@@ -49,7 +55,9 @@ with tempfile.TemporaryDirectory(prefix="taskhub-smoke-") as directory:
         assert command(config_b, "show", task_id, "--body-only") == body
         command(config_b, "update", task_id, "--status", "in_progress", "--if-status", "pending")
         command(config_a, "update", task_id, "--status", "in_progress", "--if-status", "pending", code=3)
-        command(config_b, "update", task_id, "--body", body + "\nImplemented.\n", "--status", "review")
+        revised = root / "revised-task.md"
+        revised.write_text(command(config_b, "show", task_id, "--body-only") + "\nImplemented.\n")
+        command(config_b, "update", task_id, "--body-file", str(revised), "--status", "review")
         summaries = json.loads(command(config_a, "list", "--status", "review", "--project", "ellie", "--json"))
         assert summaries == [{"id": created["id"], "title": "Shared task", "status": "review", "project": "ellie", "archived": False}]
         assert json.loads(command(config_a, "list", "--project", "plate", "--json")) == []
@@ -81,4 +89,4 @@ with tempfile.TemporaryDirectory(prefix="taskhub-smoke-") as directory:
         if process.poll() is None:
             process.terminate()
             process.wait(timeout=15)
-print("PASS: legacy migration, two clients, projects, archive hiding/restore, Markdown, claim conflict, restart, acceptance")
+print("PASS: bundled skill install, offline help, legacy migration, two clients, projects, archive/restore, body-file edits, claim conflict, restart")

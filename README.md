@@ -12,7 +12,7 @@ Or download and inspect the installer, then run it:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/felixfeng33/taskhub/main/scripts/install.sh -o install-taskhub.sh
-sh install-taskhub.sh v0.2.0
+sh install-taskhub.sh v0.3.0
 export PATH="$HOME/.local/bin:$PATH"
 taskhub version
 ```
@@ -24,6 +24,40 @@ From source, with the Go version specified in `go.mod` or newer:
 ```sh
 go install github.com/felixfeng33/taskhub/cmd/taskhub@latest
 ```
+
+## Use with Codex and natural language
+
+Install the bundled skill on each machine running Codex:
+
+```sh
+taskhub skill install
+```
+
+The destination is `$CODEX_HOME/skills/taskhub`, or `~/.codex/skills/taskhub` when `CODEX_HOME` is unset. If Codex has not refreshed skill discovery, start a new task. The skill uses that machine's existing taskhub client configuration.
+
+Then write prompts in Codex such as:
+
+```text
+$taskhub Save our final requirements as a pending task in the ellie project.
+$taskhub Add these acceptance criteria to task 12 and preserve the rest of its body.
+$taskhub Archive the completed tasks in plate.
+```
+
+The CLI remains deterministic; Codex interprets natural language and calls it. The [skill manual](skills/taskhub/SKILL.md) explains task lookup, pagination, status mapping, whole-body edits, archive/restore, conflict handling, and read-back verification.
+
+The binary contains the same manual and UI metadata as the repository, so no separate clone or download is required:
+
+```sh
+taskhub --help                    # operating manual and examples
+taskhub help update               # command-specific examples and flags
+taskhub update --help             # equivalent command help
+taskhub skill                     # print the full SKILL.md offline
+taskhub skill install --dir /path/to/skills/taskhub
+```
+
+Installing an identical skill is a no-op. If the managed files differ, installation stops before writing anything. Review local edits before using `taskhub skill install --force`; it replaces `SKILL.md` and `agents/openai.yaml` while preserving other files. Symlink destinations are refused. Installing a skill does not alter server settings or task data.
+
+These help and skill commands are available in v0.3.0 and do not require server access. The task operations described by the skill work with v0.2.0 and newer servers. After upgrading a CLI, rerun the skill installer to check for manual updates.
 
 ## Start the server
 
@@ -181,7 +215,7 @@ Back up with SQLite's online backup API or stop the service before copying the d
 go test -race ./...
 go vet ./...
 go build -o bin/taskhub ./cmd/taskhub
-sh scripts/build-release.sh v0.2.0
+sh scripts/build-release.sh v0.3.0
 ```
 
 CI tests macOS and Linux. Pushing a `v*` tag runs tests, builds four platform archives, and publishes a GitHub Release with checksums. Release binaries bundle dependency license notices.

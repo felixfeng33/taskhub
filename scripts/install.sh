@@ -1,6 +1,24 @@
 #!/bin/sh
 set -eu
 
+case "${1:-}" in
+  --help|-h)
+    cat <<'HELP'
+Usage: sh install.sh [VERSION]
+
+Install a taskhub Release for this macOS or Linux machine.
+VERSION defaults to latest. Example: sh install.sh v0.3.0
+INSTALL_DIR selects the binary directory; default: ~/.local/bin.
+The installer verifies the downloaded archive against its SHA-256 checksum.
+
+After installing, run taskhub --help for the operating manual.
+For natural-language task management in Codex, run taskhub skill install.
+Existing server connection settings and task data are retained.
+HELP
+    exit 0
+    ;;
+esac
+
 version=${1:-latest}
 case "$version" in *[!a-zA-Z0-9._-]*|'') echo 'Invalid release version' >&2; exit 1 ;; esac
 case "$(uname -s)" in

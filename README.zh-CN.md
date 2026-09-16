@@ -12,12 +12,49 @@
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/felixfeng33/taskhub/main/scripts/install.sh -o install-taskhub.sh
-sh install-taskhub.sh v0.2.0
+sh install-taskhub.sh v0.3.0
 export PATH="$HOME/.local/bin:$PATH"
 taskhub version
 ```
 
 安装脚本会核对 SHA-256。默认安装到 `~/.local/bin`，可通过 `INSTALL_DIR` 指定目录。以后重新运行脚本安装新版本即可，配置和任务数据单独保存。
+
+## 配合 AI 使用自然语言
+
+在每台运行 Codex 的 Mac 上安装 skill：
+
+```sh
+taskhub skill install
+```
+
+默认保存到 `$CODEX_HOME/skills/taskhub`，未设置 `CODEX_HOME` 时使用 `~/.codex/skills/taskhub`。如果 Codex 尚未刷新技能列表，新开一个任务即可。
+
+之后可以直接在 Codex 中说：
+
+```text
+$taskhub 把刚才的定稿保存成 ellie 的待执行任务。
+$taskhub 给任务 12 追加验收标准，保留其他正文。
+$taskhub 看看 plate 还有哪些待执行任务。
+$taskhub 把任务 12 改成待验收。
+$taskhub 归档 ellie 已完成的任务。
+$taskhub 恢复刚才归档的任务。
+```
+
+[Skill 说明书](skills/taskhub/SKILL.md) 告诉 AI 如何定位任务、翻页查找、保留正文、映射状态、处理归档和冲突，并在修改后回读确认。自然语言由 AI 理解，CLI 执行明确的命令。
+
+CLI 自带同一份说明书，不需要额外克隆仓库：
+
+```sh
+taskhub --help                  # 操作说明与示例
+taskhub help update             # 子命令用法、示例、参数
+taskhub update --help
+taskhub skill                   # 离线查看完整 SKILL.md
+taskhub skill install --dir /指定目录/skills/taskhub
+```
+
+相同内容重复安装不会改文件。如果已有文件不同，会先停止；确认本地修改后可用 `--force` 覆盖 `SKILL.md` 和 `agents/openai.yaml`，其他文件保留。安装器拒绝符号链接目标，不会修改服务器配置或任务数据。
+
+这些帮助和 skill 命令从 v0.3.0 起提供，无需连接服务器。Skill 中的任务操作兼容 v0.2.0 及更新版本的服务。CLI 升级后，可重新运行 skill 安装命令检查说明书是否更新。
 
 ## 服务器
 

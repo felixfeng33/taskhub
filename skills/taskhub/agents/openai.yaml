@@ -1,0 +1,4 @@
+interface:
+  display_name: "Taskhub"
+  short_description: "用自然语言管理共享任务、项目分类、Markdown 正文和归档状态"
+  default_prompt: "用 $taskhub 按照我的要求查找并更新任务，保留未涉及的字段并回读确认结果。"
